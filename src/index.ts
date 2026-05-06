@@ -3,13 +3,13 @@ import type { Hooks, PluginInput, Plugin } from "@opencode-ai/plugin";
 const PROVIDER_ID = "codebuddy";
 
 const CONFIG = {
-  serverUrl: "https://www.codebuddy.cn",
+  serverUrl: "https://copilot.tencent.com",
   chatCompletionsPath: "/v2/chat/completions",
   platform: "VSCode",
   appVersion: "4.3.20019762",
   ideName: "VSCode",
   ideType: "VSCode",
-  ideVersion: "1.115.0",
+  ideVersion: "1.119.0",
   domain: "www.codebuddy.cn",
   product: "SaaS",
   agentIntent: "craft",
@@ -120,13 +120,21 @@ function resolveModel(inputModel?: string): string {
   return inputModel || "";
 }
 
+function generateTraceId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function buildAuthHeaders(accessToken: string): Record<string, string> {
   const tenantId = resolveTenantId(accessToken);
   const enterpriseId = resolveEnterpriseId(accessToken);
   const userId = resolveUserId(accessToken);
-  const conversationId = generateUuid();
-  const messageId = generateUuid();
-  const sessionId = conversationId.replace(/-/g, "");
+  const conversationId = generateTraceId();
+  const messageId = generateTraceId();
+  const traceId = generateTraceId();
+  const spanId = generateTraceId().slice(0, 16);
+  const parentSpanId = generateTraceId().slice(0, 16);
 
   const headers: Record<string, string> = {
     Accept: "application/json, text/plain, */*",
@@ -137,17 +145,21 @@ function buildAuthHeaders(accessToken: string): Record<string, string> {
     "X-Conversation-ID": conversationId,
     "X-Conversation-Request-ID": messageId,
     "X-Conversation-Message-ID": messageId,
-    "X-Session-ID": sessionId,
     "X-Agent-Intent": CONFIG.agentIntent,
     "X-IDE-Type": CONFIG.ideType,
     "X-IDE-Name": CONFIG.ideName,
     "X-IDE-Version": CONFIG.ideVersion,
     "X-Product-Version": CONFIG.appVersion,
-    "X-Request-Trace-Id": messageId,
+    "X-Request-Trace-Id": traceId,
     "X-Env-ID": CONFIG.envId,
     "X-Domain": CONFIG.domain,
     "X-Product": CONFIG.product,
     "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
+    b3: `${traceId}-${spanId}-1-${parentSpanId}`,
+    "X-B3-TraceId": traceId,
+    "X-B3-ParentSpanId": parentSpanId,
+    "X-B3-SpanId": spanId,
+    "X-B3-Sampled": "1",
   };
 
   if (tenantId) headers["X-Tenant-Id"] = tenantId;

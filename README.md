@@ -14,30 +14,20 @@ OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录�
       "npm": "@ai-sdk/openai-compatible",
       "name": "CodeBuddy",
       "options": {
-        "baseURL": "https://www.codebuddy.cn/v2",
+        "baseURL": "https://copilot.tencent.com/v2",
         "setCacheKey": true
       },
       "models": {
         "auto":                    { "name": "Auto", "contextLength": 168000 },
-        "minimax-m2.5":            { "name": "MiniMax-M2.5", "contextLength": 200000 },
+        "hy3-preview":             { "name": "Hunyuan3-Preview", "contextLength": 192000 },
         "glm-5v-turbo":            { "name": "GLM-5v-Turbo", "contextLength": 200000 },
         "glm-5.1":                 { "name": "GLM-5.1", "contextLength": 200000 },
         "glm-5.0-turbo":           { "name": "GLM-5.0-Turbo", "contextLength": 200000 },
-        "glm-5.0":                 { "name": "GLM-5.0", "contextLength": 200000 },
-        "glm-4.7":                 { "name": "GLM-4.7", "contextLength": 200000 },
-        "glm-4.6v":                { "name": "GLM-4.6V", "contextLength": 128000 },
         "glm-4.6":                 { "name": "GLM-4.6", "contextLength": 168000 },
+        "kimi-k2.6":               { "name": "Kimi-K2.6", "contextLength": 256000 },
         "kimi-k2.5":               { "name": "Kimi-K2.5", "contextLength": 256000 },
-        "kimi-k2-thinking":        { "name": "Kimi-K2-Thinking", "contextLength": 256000 },
-        "deepseek-v3-2-volc":      { "name": "DeepSeek-V3.2", "contextLength": 96000 },
-        "deepseek-v3-1-volc":      { "name": "DeepSeek-V3-1-Terminus", "contextLength": 96000 },
-        "deepseek-v3-1-lkeap":     { "name": "DeepSeek-V3-1", "contextLength": 96000 },
-        "deepseek-v3-1":           { "name": "DeepSeek-V3.1", "contextLength": 96000 },
-        "deepseek-r1-0528-lkeap":  { "name": "DeepSeek-R1-0528", "contextLength": 96000 },
-        "hunyuan-2.0-instruct":    { "name": "Hunyuan-2.0-Instruct", "contextLength": 128000 },
-        "hunyuan-chat":            { "name": "Hunyuan-Turbos", "contextLength": 128000 },
-        "default-1.1":             { "name": "Claude-3.7-Sonnet", "contextLength": 200000 },
-        "default-1.2":             { "name": "Claude-4.0-Sonnet", "contextLength": 200000 }
+        "deepseek-v4-flash":       { "name": "DeepSeek-V4-Flash", "contextLength": 1000000 },
+        "deepseek-v3-2-volc":      { "name": "DeepSeek-V3.2", "contextLength": 96000 }
       }
     }
   }
@@ -54,28 +44,20 @@ opencode auth codebuddy
 
 ## 可用模型
 
+以下为 craft agent 支持的模型（来自 `/v3/config` 接口）：
+
 | 模型 ID | 名称 | 上下文长度 | 图片 | 推理 |
 |---------|------|-----------|------|------|
 | `auto` | Auto | 168K | Yes | - |
-| `minimax-m2.5` | MiniMax-M2.5 | 200K | Yes | Yes |
+| `hy3-preview` | Hunyuan3-Preview | 192K | Yes | Yes |
 | `glm-5v-turbo` | GLM-5v-Turbo | 200K | Yes | Yes |
 | `glm-5.1` | GLM-5.1 | 200K | No | Yes |
 | `glm-5.0-turbo` | GLM-5.0-Turbo | 200K | No | Yes |
-| `glm-5.0` | GLM-5.0 | 200K | Yes | Yes |
-| `glm-4.7` | GLM-4.7 | 200K | Yes | Yes |
-| `glm-4.6v` | GLM-4.6V | 128K | Yes | Yes |
 | `glm-4.6` | GLM-4.6 | 168K | No | - |
+| `kimi-k2.6` | Kimi-K2.6 | 256K | Yes | Yes |
 | `kimi-k2.5` | Kimi-K2.5 | 256K | Yes | Yes |
-| `kimi-k2-thinking` | Kimi-K2-Thinking | 256K | Yes | Yes |
+| `deepseek-v4-flash` | DeepSeek-V4-Flash | 1M | Yes | Yes |
 | `deepseek-v3-2-volc` | DeepSeek-V3.2 | 96K | Yes | Yes |
-| `deepseek-v3-1-volc` | DeepSeek-V3-1-Terminus | 96K | No | - |
-| `deepseek-v3-1-lkeap` | DeepSeek-V3-1 | 96K | No | - |
-| `deepseek-v3-1` | DeepSeek-V3.1 | 96K | No | - |
-| `deepseek-r1-0528-lkeap` | DeepSeek-R1-0528 | 96K | No | - |
-| `hunyuan-2.0-instruct` | Hunyuan-2.0-Instruct | 128K | Yes | Yes |
-| `hunyuan-chat` | Hunyuan-Turbos | 128K | No | - |
-| `default-1.1` | Claude-3.7-Sonnet | 200K | Yes | - |
-| `default-1.2` | Claude-4.0-Sonnet | 200K | Yes | - |
 
 模型列表来自 `/v3/config` 接口，可能随时更新。
 
@@ -90,12 +72,12 @@ curl -H 'Accept: application/json, text/plain, */*' \
      -H 'X-Product: SaaS' \
      -H 'X-IDE-Type: VSCode' \
      -H 'X-IDE-Name: VSCode' \
-     -H 'X-IDE-Version: 1.115.0' \
+     -H 'X-IDE-Version: 1.119.0' \
      -H 'X-Product-Version: 4.3.20019762' \
      -H 'X-Request-Trace-Id: <UUID>' \
      -H 'X-Env-ID: production' \
-     -H 'User-Agent: VSCode/1.115.0 CodeBuddy/4.3.20019762' \
-     'https://www.codebuddy.cn/v3/config'
+     -H 'User-Agent: VSCode/1.119.0 CodeBuddy/4.3.20019762' \
+     'https://copilot.tencent.com/v3/config'
 ```
 
 - `data.models` — 所有可用模型
@@ -110,11 +92,16 @@ curl -H 'Accept: application/json, text/plain, */*' \
 | `CODEBUDDY_USER_ID` | 覆盖 user_id（不设置则从 JWT 自动提取） | 否 |
 | `CODEBUDDY_DEFAULT_MODEL` | 强制使用指定模型 | 否 |
 
-## 内网 vs 外网
+## 国内版 vs 国际版
 
-本插件默认适配**外网** CodeBuddy 服务（`www.codebuddy.cn`）。
+本插件默认适配**国内版** CodeBuddy 服务。`serverUrl` 和 `X-Domain` 需匹配对应环境：
 
-如果 JWT 的 `iss` 字段包含 `copilot.tencent.com`，说明是内网用户，需修改源码中 `CONFIG.serverUrl` 为 `https://copilot.tencent.com`。
+| 环境 | serverUrl | X-Domain |
+|------|-----------|----------|
+| 国内版（默认） | `https://copilot.tencent.com` | `www.codebuddy.cn` |
+| 国际版 | `https://www.codebuddy.ai` | `www.codebuddy.ai` |
+
+切换环境时需同时修改源码中 `CONFIG.serverUrl` 和 `CONFIG.domain`。
 
 ## 工作原理
 
@@ -124,8 +111,8 @@ OpenCode CLI
   │              fetch 拦截所有 /chat/completions 请求
   ├─ 认证流程 → 浏览器 IOA OAuth → 获取 access_token + refresh_token
   └─ 对话流程 → 拦截请求
-                附加认证 headers（Authorization, X-Session-ID 等）
-                转发到 https://www.codebuddy.cn/v2/chat/completions
+                附加认证 headers（Authorization, B3 追踪等）
+                转发到 https://copilot.tencent.com/v2/chat/completions
                 直接透传 OpenAI 兼容 SSE 响应
 ```
 
