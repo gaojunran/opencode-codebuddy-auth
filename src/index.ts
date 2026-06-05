@@ -1,4 +1,11 @@
-import type { Hooks, PluginInput, Plugin } from "@opencode-ai/plugin";
+import type {
+  Hooks,
+  PluginInput,
+  Plugin,
+} from "@opencode-ai/plugin";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 const PROVIDER_ID = "codebuddy";
 
@@ -6,7 +13,7 @@ const CONFIG = {
   serverUrl: "https://copilot.tencent.com",
   chatCompletionsPath: "/v2/chat/completions",
   platform: "VSCode",
-  appVersion: "4.3.20019762",
+  appVersion: "4.9.29177644",
   ideName: "VSCode",
   ideType: "VSCode",
   ideVersion: "1.119.0",
@@ -69,6 +76,66 @@ interface OpenAIRequest {
   [key: string]: unknown;
 }
 
+interface RemoteModel {
+  id: string;
+  name: string;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  supportsToolCall?: boolean;
+  supportsImages?: boolean;
+  supportsReasoning?: boolean;
+}
+
+interface RemoteConfigResponse {
+  code: number;
+  data?: {
+    agents?: Array<{ name: string; models?: string[] }>;
+    models?: RemoteModel[];
+  };
+}
+
+const DEFAULT_MODEL: RemoteModel = { id: "auto", name: "Auto", maxInputTokens: 168000, maxOutputTokens: 32000, supportsToolCall: true };
+
+const DISCOVERY_TIMEOUT_MS = 5000;
+
+function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
+  const entry: Record<string, unknown> = { name: m.name };
+  if (m.maxInputTokens || m.maxOutputTokens) {
+    entry.limit = { context: m.maxInputTokens ?? 0, output: m.maxOutputTokens ?? 0 };
+  }
+  if (m.supportsToolCall) entry.tool_call = true;
+  if (m.supportsImages) entry.attachment = true;
+  return entry;
+}
+
+async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
+  const headers: Record<string, string> = {
+    Accept: "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+    Authorization: `Bearer ${accessToken}`,
+    "X-Agent-Intent": CONFIG.agentIntent,
+    "X-IDE-Type": CONFIG.ideType,
+    "X-IDE-Name": CONFIG.ideName,
+    "X-IDE-Version": CONFIG.ideVersion,
+    "X-Product-Version": CONFIG.appVersion,
+    "X-Env-ID": CONFIG.envId,
+    "X-Domain": CONFIG.domain,
+    "X-Product": CONFIG.product,
+    "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
+  };
+  const resp = await fetch(`${CONFIG.serverUrl}/v3/config`, { headers });
+  if (!resp.ok) return [];
+  const body = (await resp.json()) as RemoteConfigResponse;
+  if (body.code !== 0 || !body.data) return [];
+  const allModels = body.data.models || [];
+  const modelMap = new Map(allModels.map((m) => [m.id, m]));
+  const craftAgent = (body.data.agents || []).find((a) => a.name === CONFIG.agentIntent);
+  const craftIds = craftAgent?.models || [];
+  if (craftIds.length === 0) return [DEFAULT_MODEL];
+  return craftIds.map((id) => modelMap.get(id)).filter((m): m is RemoteModel => !!m?.supportsToolCall);
+}
+
 function generateUuid(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -126,7 +193,10 @@ function generateTraceId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function buildAuthHeaders(accessToken: string): Record<string, string> {
+function buildAuthHeaders(
+  accessToken: string,
+  modelId?: string,
+): Record<string, string> {
   const tenantId = resolveTenantId(accessToken);
   const enterpriseId = resolveEnterpriseId(accessToken);
   const userId = resolveUserId(accessToken);
@@ -165,6 +235,7 @@ function buildAuthHeaders(accessToken: string): Record<string, string> {
   if (tenantId) headers["X-Tenant-Id"] = tenantId;
   if (enterpriseId) headers["X-Enterprise-Id"] = enterpriseId;
   if (userId) headers["X-User-Id"] = userId;
+  if (modelId) headers["X-Model-ID"] = modelId;
 
   return headers;
 }
@@ -263,6 +334,46 @@ async function refreshAccessToken(
 
 export const CodeBuddyAuthPlugin: Plugin = async (input) => {
   return {
+    async config(config) {
+      if (!config.provider) return;
+      const provider = config.provider[PROVIDER_ID] as
+        | Record<string, unknown>
+        | undefined;
+      if (!provider) return;
+      if (!provider.models) {
+        provider.models = {};
+      }
+      const models = provider.models as Record<string, unknown>;
+
+      let discovered: RemoteModel[] = [];
+      try {
+        const home = os.homedir();
+        const authPath = path.join(home, ".local", "share", "opencode", "auth.json");
+        const raw = fs.readFileSync(authPath, "utf8");
+        const all = JSON.parse(raw) as Record<string, { type: string; access?: string }>;
+        const auth = all[PROVIDER_ID];
+        if (auth?.type === "oauth" && auth.access) {
+          const work = fetchRemoteModels(auth.access);
+          discovered = await Promise.race([
+            work,
+            new Promise<RemoteModel[]>((resolve) =>
+              setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+            ),
+          ]);
+        }
+      } catch {
+        // auth not available yet, use fallback
+      }
+
+      if (discovered.length === 0) {
+        discovered = [DEFAULT_MODEL];
+      }
+
+      for (const m of discovered) {
+        if (models[m.id]) continue;
+        models[m.id] = remoteModelToConfig(m);
+      }
+    },
     auth: {
       provider: PROVIDER_ID,
       async loader(getAuth, _provider) {
@@ -322,7 +433,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
                 `${CONFIG.serverUrl}${CONFIG.chatCompletionsPath}`,
                 {
                   method: "POST",
-                  headers: buildAuthHeaders(token),
+                  headers: buildAuthHeaders(token, resolvedModel),
                   body: JSON.stringify(requestBody),
                 },
               );

@@ -18,9 +18,20 @@ npm install && npm run build   # tsc 编译到 dist/
 - 运行时作为 OpenCode 插件加载，通过自定义 `fetch` 拦截 `/chat/completions` 请求并注入 CodeBuddy 认证 headers
 - `@opencode-ai/plugin` 是 peer dependency，仅开发时安装
 
+### 核心 Hooks
+
+1. **config** — 启动时从 `~/.local/share/opencode/auth.json` 读取已保存的 access token，调用 `GET /v3/config` 动态获取 craft agent 可用模型，注入到 `config.provider.codebuddy.models`；未登录或获取失败时 fallback 为 `auto` 默认模型；不覆盖用户手动声明的 models
+2. **auth** — IOA OAuth 登录流程（浏览器 → 轮询 token），loader 返回自定义 fetch 拦截请求
+3. **chat.params** — 设置 baseURL
+
+### 用户配置
+
+`codebuddy` 不在 models.dev 数据库中，用户需在 `opencode.json` 中声明 `provider.codebuddy`（含 npm、options），**无需手动声明 models** — `config` hook 会自动注入。用户也可手动声明 models 来覆盖自动注入的值。
+
 ## 环境
 
 - 国内版 API：`copilot.tencent.com`，`X-Domain: www.codebuddy.cn`
 - 国际版 API：`www.codebuddy.ai`，`X-Domain: www.codebuddy.ai`
 - 切换环境需同时改 `CONFIG.serverUrl` 和 `CONFIG.domain`
-- 模型列表通过 `GET /v3/config` 获取，可能随时变化
+- 模型列表通过 `GET /v3/config` 获取（需 access token），可能随时变化
+- Token 存储路径：`~/.local/share/opencode/auth.json`，config hook 直接读取该文件获取 token
