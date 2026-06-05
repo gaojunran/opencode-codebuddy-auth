@@ -1,10 +1,24 @@
 # opencode-codebuddy-auth
 
-OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode CLI 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取可用模型列表，无需手动配置。
+OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode CLI 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取可用模型列表，支持国内版和国际版切换。
 
 ## 安装
 
-在 `opencode.json` 中添加：
+在 `opencode.json` 中添加插件即可，三种配置方式任选其一：
+
+#### 方式一：最简配置（推荐）
+
+只需添加插件，provider 和 models 由插件自动创建和发现：
+
+```jsonc
+{
+  "plugin": ["opencode-codebuddy-auth"]
+}
+```
+
+#### 方式二：声明 provider，自动发现 models
+
+手动声明 provider 配置，但无需写 models（由 `config` hook 自动注入）：
 
 ```jsonc
 {
@@ -22,11 +36,9 @@ OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录�
 }
 ```
 
-> 插件通过 `config` hook 在启动时动态从 CodeBuddy API (`GET /v3/config`) 获取 craft agent 可用模型，自动注入到 `provider.codebuddy.models`。**无需手动声明 models**。未登录时 fallback 为 `auto` 默认模型。
->
-> 如需覆盖，可在 `provider.codebuddy.models` 中手动声明，插件不会覆盖已有条目。
+#### 方式三：手动声明 models
 
-#### 手动声明 models（可选）
+完全手动控制模型列表，插件不会覆盖已有条目：
 
 ```jsonc
 {
@@ -56,6 +68,8 @@ OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录�
   }
 }
 ```
+
+> 插件通过 `config` hook 在启动时动态从 CodeBuddy API (`GET /v3/config`) 获取 craft agent 可用模型，自动注入到 `provider.codebuddy.models`。未登录时 fallback 为 `auto` 默认模型。如需覆盖，可在 `provider.codebuddy.models` 中手动声明，插件不会覆盖已有条目。
 
 ## 登录
 
@@ -139,14 +153,27 @@ opencode
 
 ## 国内版 vs 国际版
 
-本插件默认适配**国内版** CodeBuddy 服务。`serverUrl` 和 `X-Domain` 需匹配对应环境：
+默认使用**国内版**。切换国际版只需修改 `baseURL`，插件会自动检测并切换 `X-Domain`：
 
-| 环境 | serverUrl | X-Domain |
-|------|-----------|----------|
-| 国内版（默认） | `https://copilot.tencent.com` | `www.codebuddy.cn` |
-| 国际版 | `https://www.codebuddy.ai` | `www.codebuddy.ai` |
+```jsonc
+{
+  "plugin": ["opencode-codebuddy-auth"],
+  "provider": {
+    "codebuddy": {
+      "options": {
+        "baseURL": "https://www.codebuddy.ai/v2"
+      }
+    }
+  }
+}
+```
 
-切换环境时需同时修改源码中 `CONFIG.serverUrl` 和 `CONFIG.domain`。
+| 环境 | baseURL | X-Domain（自动检测） |
+|------|---------|---------|
+| 国内版（默认） | `https://copilot.tencent.com/v2` | `www.codebuddy.cn` |
+| 国际版 | `https://www.codebuddy.ai/v2` | `www.codebuddy.ai` |
+
+> 插件根据 `baseURL` 自动设置 `X-Domain`：检测到 `codebuddy.ai` 时使用 `www.codebuddy.ai`，否则默认 `www.codebuddy.cn`。
 
 ## 工作原理
 
@@ -160,7 +187,7 @@ OpenCode CLI
   │              fetch 拦截所有 /chat/completions 请求
   └─ 对话流程 → 拦截请求
                 附加认证 headers（Authorization, B3 追踪, X-Model-ID 等）
-                转发到 https://copilot.tencent.com/v2/chat/completions
+                转发到 CodeBuddy /v2/chat/completions
                 直接透传 OpenAI 兼容 SSE 响应
 ```
 

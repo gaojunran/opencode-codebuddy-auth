@@ -98,6 +98,9 @@ const DEFAULT_MODEL: RemoteModel = { id: "auto", name: "Auto", maxInputTokens: 1
 
 const DISCOVERY_TIMEOUT_MS = 5000;
 
+let resolvedServerUrl = CONFIG.serverUrl;
+let resolvedDomain = CONFIG.domain;
+
 function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   const entry: Record<string, unknown> = { name: m.name };
   if (m.maxInputTokens || m.maxOutputTokens) {
@@ -120,11 +123,11 @@ async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
     "X-IDE-Version": CONFIG.ideVersion,
     "X-Product-Version": CONFIG.appVersion,
     "X-Env-ID": CONFIG.envId,
-    "X-Domain": CONFIG.domain,
+    "X-Domain": resolvedDomain,
     "X-Product": CONFIG.product,
     "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
   };
-  const resp = await fetch(`${CONFIG.serverUrl}/v3/config`, { headers });
+  const resp = await fetch(`${resolvedServerUrl}/v3/config`, { headers });
   if (!resp.ok) return [];
   const body = (await resp.json()) as RemoteConfigResponse;
   if (body.code !== 0 || !body.data) return [];
@@ -222,7 +225,7 @@ function buildAuthHeaders(
     "X-Product-Version": CONFIG.appVersion,
     "X-Request-Trace-Id": traceId,
     "X-Env-ID": CONFIG.envId,
-    "X-Domain": CONFIG.domain,
+    "X-Domain": resolvedDomain,
     "X-Product": CONFIG.product,
     "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
     b3: `${traceId}-${spanId}-1-${parentSpanId}`,
@@ -247,7 +250,7 @@ function sleep(ms: number): Promise<void> {
 async function requestAuthState(): Promise<{ state: string; url: string }> {
   const params = new URLSearchParams({ platform: CONFIG.platform, ioa: "1" });
   const response = await fetch(
-    `${CONFIG.serverUrl}/v2/plugin/auth/state?${params.toString()}`,
+    `${resolvedServerUrl}/v2/plugin/auth/state?${params.toString()}`,
     {
       method: "POST",
       headers: {
@@ -270,7 +273,7 @@ async function requestAuthState(): Promise<{ state: string; url: string }> {
   }
   const loginUrl =
     data.data.authUrl ||
-    `${CONFIG.serverUrl}/login?platform=${CONFIG.platform}&state=${data.data.state}&ioa=1`;
+    `${resolvedServerUrl}/login?platform=${CONFIG.platform}&state=${data.data.state}&ioa=1`;
   return { state: data.data.state, url: loginUrl };
 }
 
@@ -284,7 +287,7 @@ async function pollForToken(
     await sleep(3000);
     try {
       const response = await fetch(
-        `${CONFIG.serverUrl}/v2/plugin/auth/token?state=${state}`,
+        `${resolvedServerUrl}/v2/plugin/auth/token?state=${state}`,
         {
           method: "GET",
           headers: {
@@ -313,7 +316,7 @@ async function refreshAccessToken(
 ): Promise<RefreshResponse["data"] | null> {
   try {
     const response = await fetch(
-      `${CONFIG.serverUrl}/v2/plugin/auth/token/refresh`,
+      `${resolvedServerUrl}/v2/plugin/auth/token/refresh`,
       {
         method: "POST",
         headers: {
@@ -335,11 +338,33 @@ async function refreshAccessToken(
 export const CodeBuddyAuthPlugin: Plugin = async (input) => {
   return {
     async config(config) {
-      if (!config.provider) return;
+      if (!config.provider) config.provider = {};
+      if (!config.provider[PROVIDER_ID]) {
+        config.provider[PROVIDER_ID] = {
+          npm: "@ai-sdk/openai-compatible",
+          name: "CodeBuddy",
+          options: {
+            baseURL: `${resolvedServerUrl}/v2`,
+            setCacheKey: true,
+          },
+          models: {},
+        };
+      }
       const provider = config.provider[PROVIDER_ID] as
         | Record<string, unknown>
         | undefined;
       if (!provider) return;
+      const opts = (provider.options || {}) as Record<string, unknown>;
+      const configuredBase = typeof opts.baseURL === "string" ? opts.baseURL : undefined;
+      if (configuredBase) {
+        try {
+          const u = new URL(configuredBase);
+          resolvedServerUrl = `${u.protocol}//${u.host}`;
+          if (resolvedServerUrl.includes("codebuddy.ai")) {
+            resolvedDomain = "www.codebuddy.ai";
+          }
+        } catch {}
+      }
       if (!provider.models) {
         provider.models = {};
       }
@@ -379,7 +404,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
       async loader(getAuth, _provider) {
         return {
           apiKey: "cli-proxy",
-          baseURL: CONFIG.serverUrl,
+          baseURL: resolvedServerUrl,
           async fetch(
             url: RequestInfo | URL,
             init?: RequestInit,
@@ -430,7 +455,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
 
             const doRequest = async (token: string) => {
               return fetch(
-                `${CONFIG.serverUrl}${CONFIG.chatCompletionsPath}`,
+                `${resolvedServerUrl}${CONFIG.chatCompletionsPath}`,
                 {
                   method: "POST",
                   headers: buildAuthHeaders(token, resolvedModel),
@@ -513,7 +538,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
     },
     async "chat.params"(input, output) {
       if (input.model.providerID !== PROVIDER_ID) return;
-      output.options.baseURL = CONFIG.serverUrl;
+      output.options.baseURL = resolvedServerUrl;
     },
   } satisfies Hooks;
 };

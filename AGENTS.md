@@ -26,7 +26,10 @@ npm install && npm run build   # tsc 编译到 dist/
 
 ### 用户配置
 
-`codebuddy` 不在 models.dev 数据库中，用户需在 `opencode.json` 中声明 `provider.codebuddy`（含 npm、options），**无需手动声明 models** — `config` hook 会自动注入。用户也可手动声明 models 来覆盖自动注入的值。
+`codebuddy` 不在 models.dev 数据库中，插件通过 `config` hook 自动创建 `provider.codebuddy`（如未声明），并动态注入 models。支持三种配置方式：
+1. 只加 `plugin`，不声明 provider（推荐，全自动）
+2. 声明 provider 不声明 models（自动发现模型）
+3. 手动声明 provider + models（完全手动控制）
 
 ## 环境
 
