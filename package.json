@@ -1,7 +1,11 @@
 {
-  "name": "opencode-codebuddy-auth",
-  "version": "1.0.3",
-  "description": "OpenCode plugin for CodeBuddy (IOA) authentication",
+  "name": "opencode-codebuddy-auth-fixed",
+  "version": "1.0.0",
+  "description": "OpenCode plugin for CodeBuddy (IOA) authentication, with reasoning coalescing fix",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gaojunran/opencode-codebuddy-auth.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

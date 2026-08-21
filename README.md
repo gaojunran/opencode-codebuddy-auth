@@ -2,6 +2,8 @@
 
 OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode CLI 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取可用模型列表，支持国内版和国际版切换。
 
+> 本仓库是 [`kuops/opencode-codebuddy-auth`](https://github.com/kuops/opencode-codebuddy-auth) 的分支，额外修复了 codebuddy 流式推理被逐词碎片化的问题（见下文「与上游差异」）。
+
 ## 安装
 
 在 `opencode.json` 中添加插件即可，三种配置方式任选其一：
@@ -12,7 +14,7 @@ OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录�
 
 ```jsonc
 {
-  "plugin": ["opencode-codebuddy-auth"]
+  "plugin": ["opencode-codebuddy-auth-fixed"]
 }
 ```
 
@@ -194,6 +196,26 @@ OpenCode CLI
 - **自定义 fetch** 拦截所有 `/chat/completions` 请求，绕过 AI SDK 默认认证
 - **自动 token 刷新** — 遇到 401/403 时自动刷新 token 后重试
 - **无需 SSE 转换** — API 已直接返回标准 OpenAI 格式
+
+## 与上游差异
+
+CodeBuddy 后端在 **每一帧** SSE 中都下发 `tool_calls: []`（空数组，非 null）。而
+`@ai-sdk/openai-compatible` 的解析器对任何非 null 的 `tool_calls` 都会触发一次
+`reasoning-end`，于是推理流被逐词重置成独立的 thinking 块——TUI 里表现为"每个字
+一个 Thinking 块"（几千个小块，每个显示 `Thought: Nms`）。
+
+本分支在插件的自定义 fetch 透传 SSE 前，对每个 `data:` 帧做流式改写：把空
+`tool_calls` 数组归一为 `null`。真实工具调用不受影响（非空数组原样保留），
+连续推理会累积成单个 thinking 块。
+
+```bash
+# 安装本分支（npm 包名与上游不同）
+npm i -D opencode-codebuddy-auth-fixed
+```
+
+> 该问题的根因在 CodeBuddy 后端（不应在无工具调用的流里下发空数组），同时
+> 也在 `@ai-sdk/openai-compatible` 解析器（对空数组的 `!= null` 判断过于宽松）。
+> 若上游修复任意一端，此改写逻辑自然退化为无害透传。
 
 ## 开发
 

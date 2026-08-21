@@ -335,6 +335,52 @@ async function refreshAccessToken(
   }
 }
 
+// CodeBuddy 后端在每一帧 SSE 中都下发 `tool_calls: []`（空数组，非 null）。
+// @ai-sdk/openai-compatible 对任何非 null 的 tool_calls 都会触发 reasoning-end，
+// 导致逐词碎片化的 thinking 块。这里把空数组归一为 null，使连续推理累积成单个块。
+function coalesceStream(response: Response): Response {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  const stream = response.body!.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (line.startsWith("data:")) {
+            const payload = line.slice(5).trim();
+            if (payload && payload !== "[DONE]") {
+              try {
+                const obj = JSON.parse(payload);
+                const delta = obj?.choices?.[0]?.delta;
+                if (
+                  delta &&
+                  Array.isArray(delta.tool_calls) &&
+                  delta.tool_calls.length === 0
+                ) {
+                  delta.tool_calls = null;
+                }
+                controller.enqueue(encoder.encode(`data:${JSON.stringify(obj)}\n`));
+                continue;
+              } catch {}
+            }
+          }
+          controller.enqueue(encoder.encode(line + "\n"));
+        }
+      },
+      flush(controller) {
+        if (buffer) controller.enqueue(encoder.encode(buffer));
+      },
+    }),
+  );
+  return new Response(stream, { status: response.status, headers });
+}
+
 export const CodeBuddyAuthPlugin: Plugin = async (input) => {
   return {
     async config(config) {
@@ -501,7 +547,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
               });
             }
 
-            return response;
+            return coalesceStream(response);
           },
         };
       },
