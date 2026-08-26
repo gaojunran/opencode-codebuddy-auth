@@ -92,21 +92,43 @@ opencode models codebuddy
 
 IOA 登录后，config hook 会通过 `GET /v3/config` 实时获取 craft agent 可用模型并自动注入。
 
-#### craft agent 支持的模型（来自 /v3/config 接口，可能随时更新）
+#### craft agent 支持的模型（来自 `/v3/config` 接口，可能随时更新）
+
+默认（国内端点）发现 = 国内 craft 列表 ∪ 国际端点 craft 列表 ∪ 内置补充清单（claude / gpt-5.6 系列，去重合并，对话仍走国内端点）。
 
 | 模型 ID | 名称 | 上下文 | 图片 | 推理 |
 |---------|------|--------|------|------|
 | `auto` | Auto | 168K | Yes | Yes |
-| `hy3-preview-agent` | Hy3-preview | 192K | Yes | Yes |
-| `glm-5v-turbo` | GLM-5v-Turbo | 200K | Yes | Yes |
+| `default-model` | Auto（国际） | 176K | Yes | - |
+| `hy3` / `hy3-x` | Hy3 | 192K | Yes | Yes |
+| `gpt-5.6-sol` | GPT-5.6-Sol | 1M | Yes | Yes |
+| `gpt-5.6-terra` | GPT-5.6-Terra | 1M | Yes | Yes |
+| `gpt-5.6-luna` | GPT-5.6-Luna | 1M | Yes | Yes |
+| `gpt-5.5` | GPT-5.5 | 1M | Yes | Yes |
+| `gpt-5.4` | GPT-5.4 | 272K | Yes | Yes |
+| `gpt-5.3-codex` | GPT-5.3-Codex | 272K | Yes | Yes |
+| `gemini-3.5-flash` | Gemini-3.5-Flash | 1M | Yes | Yes |
+| `glm-5.3` | GLM-5.3 | 1M | Yes | Yes |
+| `glm-5.2` | GLM-5.2 | 1M | Yes | Yes |
 | `glm-5.1` | GLM-5.1 | 200K | Yes | Yes |
-| `glm-5.0-turbo` | GLM-5.0-Turbo | 200K | Yes | Yes |
-| `glm-4.6` | GLM-4.6 | 168K | No | - |
+| `glm-5v-turbo` | GLM-5v-Turbo | 200K | Yes | Yes |
+| `kimi-k3-1` | Kimi-K3 | 1M | Yes | Yes |
+| `kimi-k2.7` | Kimi-K2.7-Code | 256K | Yes | Yes |
 | `kimi-k2.6` | Kimi-K2.6 | 256K | Yes | Yes |
-| `kimi-k2.5` | Kimi-K2.5 | 256K | Yes | Yes |
-| `deepseek-v4-pro` | DeepSeek-V4-Pro | 1M | Yes | Yes |
-| `deepseek-v4-flash` | DeepSeek-V4-Flash | 1M | Yes | Yes |
-| `deepseek-v3-2-volc` | DeepSeek-V3.2 | 96K | Yes | Yes |
+| `minimax-m3` | MiniMax-M3 | 512K | Yes | Yes |
+| `deepseek-v4-pro` | Deepseek-V4-Pro | 1M | Yes | Yes |
+| `deepseek-v4-flash` | Deepseek-V4-Flash | 1M | Yes | Yes |
+| `claude-sonnet-5` | Claude-Sonnet-5 | 200K | Yes | Yes |
+| `claude-sonnet-5-1m` | Claude-Sonnet-5-1M | 1M | Yes | Yes |
+| `claude-sonnet-4.6` | Claude-Sonnet-4.6 | 176K | Yes | Yes |
+| `claude-sonnet-4.6-1m` | Claude-Sonnet-4.6-1M | 1M | Yes | Yes |
+| `claude-opus-4.8` | Claude-Opus-4.8 | 176K | Yes | Yes |
+| `claude-opus-4.8-1m` | Claude-Opus-4.8-1M | 1M | Yes | Yes |
+| `claude-opus-4.7` | Claude-Opus-4.7 | 176K | Yes | Yes |
+| `claude-opus-4.7-1m` | Claude-Opus-4.7-1M | 1M | Yes | Yes |
+| `claude-opus-4.6` | Claude-Opus-4.6 | 176K | Yes | Yes |
+| `claude-opus-4.6-1m` | Claude-Opus-4.6-1M | 1M | Yes | Yes |
+| `claude-haiku-4.5` | Claude-Haiku-4.5 | 176K | Yes | Yes |
 
 #### 动态获取模型列表
 
@@ -129,6 +151,27 @@ curl -H 'Accept: application/json, text/plain, */*' \
 
 - `data.models` — 所有可用模型的详细信息
 - `data.agents[0].models` — craft agent 可用的模型 ID 列表
+
+### 自定义模型补充清单（extraModels）
+
+`/v3/config` 的 craft 列表未暴露部分后端实际可用的模型（如 claude、gpt-5.6 系列）。插件默认内置一份实测可用的补充清单并合并注入；如需自定义，可在 `plugin` 条目的 options 中提供 `extraModels`，提供后将**整体替换**内置清单：
+
+```jsonc
+{
+  "plugin": [
+    [
+      "opencode-codebuddy-auth-fixed",
+      {
+        "extraModels": [
+          { "id": "claude-sonnet-5", "name": "Claude-Sonnet-5", "context": 200000, "output": 64000 }
+        ]
+      }
+    ]
+  ]
+}
+```
+
+条目字段：`id`（必填）、`name`、`context`（上下文）、`output`（输出上限）、`tool_call`（默认 true）、`attachment`（默认 true）。补充模型按 id 去重合并，不覆盖 `/v3/config` 已发现或用户手动声明的 models。未配置 `extraModels` 时使用内置默认清单（claude / gpt-5.6 系列，见上方模型表）。
 
 ## 环境变量
 
@@ -155,7 +198,9 @@ opencode
 
 ## 国内版 vs 国际版
 
-默认使用**国内版**。切换国际版只需修改 `baseURL`，插件会自动检测并切换 `X-Domain`：
+默认使用**国内版**（`copilot.tencent.com`）。模型发现 = 国内 craft 列表 ∪ 国际端点 `www.codebuddy.ai` 的 craft 列表 ∪ 内置补充清单（claude / gpt-5.6 系列），去重合并。因此 **GPT-5.6 系列、Claude、Gemini 等模型会出现在模型列表中，对话仍走国内端点** —— 这些模型在国内端点后端可直接调用（已实测），无需国际账号登录。
+
+如需完整切换到国际版（对话也走国际端点），修改 `baseURL` 即可，插件会自动检测并切换 `X-Domain`：
 
 ```jsonc
 {
@@ -175,7 +220,7 @@ opencode
 | 国内版（默认） | `https://copilot.tencent.com/v2` | `www.codebuddy.cn` |
 | 国际版 | `https://www.codebuddy.ai/v2` | `www.codebuddy.ai` |
 
-> 插件根据 `baseURL` 自动设置 `X-Domain`：检测到 `codebuddy.ai` 时使用 `www.codebuddy.ai`，否则默认 `www.codebuddy.cn`。
+> 插件根据 `baseURL` 自动设置 `X-Domain`：检测到 `codebuddy.ai` 时使用 `www.codebuddy.ai`，否则使用 `www.codebuddy.cn`。国际版模式下发现只取国际列表（不合并），且需要国际账号登录。
 
 ## 工作原理
 

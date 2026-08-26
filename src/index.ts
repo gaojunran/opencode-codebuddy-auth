@@ -96,6 +96,53 @@ interface RemoteConfigResponse {
 
 const DEFAULT_MODEL: RemoteModel = { id: "auto", name: "Auto", maxInputTokens: 168000, maxOutputTokens: 32000, supportsToolCall: true };
 
+// /v3/config 的 craft 列表（国内外）均不暴露 claude / gpt-5.6 系列模型，但它们在
+// 国内端点后端可直接调用（已实测 copilot.tencent.com/v2）。这里按产品目录元数据补充，
+// 仅在国内端点主模式下合并；若后端 /v3/config 之后补上同 id 模型，则以前者为准（此处不覆盖）。
+const EXTRA_MODELS: RemoteModel[] = [
+  { id: "claude-sonnet-4.6", name: "Claude-Sonnet-4.6", maxInputTokens: 176000, maxOutputTokens: 24000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-sonnet-5-1m", name: "Claude-Sonnet-5-1M", maxInputTokens: 1000000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-sonnet-5", name: "Claude-Sonnet-5", maxInputTokens: 200000, maxOutputTokens: 64000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-sonnet-4.6-1m", name: "Claude-Sonnet-4.6-1M", maxInputTokens: 1000000, maxOutputTokens: 24000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.8", name: "Claude-Opus-4.8", maxInputTokens: 176000, maxOutputTokens: 64000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.8-1m", name: "Claude-Opus-4.8-1M", maxInputTokens: 1000000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.7", name: "Claude-Opus-4.7", maxInputTokens: 176000, maxOutputTokens: 64000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.7-1m", name: "Claude-Opus-4.7-1M", maxInputTokens: 1000000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.6", name: "Claude-Opus-4.6", maxInputTokens: 176000, maxOutputTokens: 24000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-opus-4.6-1m", name: "Claude-Opus-4.6-1M", maxInputTokens: 1000000, maxOutputTokens: 64000, supportsToolCall: true, supportsImages: true },
+  { id: "claude-haiku-4.5", name: "Claude-Haiku-4.5", maxInputTokens: 176000, maxOutputTokens: 24000, supportsToolCall: true, supportsImages: true },
+  { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", maxInputTokens: 1050000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+  { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", maxInputTokens: 1050000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+  { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", maxInputTokens: 1050000, maxOutputTokens: 128000, supportsToolCall: true, supportsImages: true },
+];
+
+// 插件设置：opencode 配置中 plugin 条目的 options（["opencode-codebuddy-auth-fixed", { ... }]）。
+// extraModels 提供后整体替换内置补充清单，未提供则用上面的默认清单。
+interface PluginSettings {
+  extraModels?: Array<{
+    id: string;
+    name?: string;
+    context?: number;
+    output?: number;
+    tool_call?: boolean;
+    attachment?: boolean;
+  }>;
+}
+
+function settingsToRemoteModels(list: PluginSettings["extraModels"]): RemoteModel[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((m) => m && typeof m.id === "string" && m.id)
+    .map((m) => ({
+      id: m.id,
+      name: m.name ?? m.id,
+      maxInputTokens: m.context,
+      maxOutputTokens: m.output,
+      supportsToolCall: m.tool_call !== false,
+      supportsImages: m.attachment !== false,
+    }));
+}
+
 const DISCOVERY_TIMEOUT_MS = 5000;
 
 let resolvedServerUrl = CONFIG.serverUrl;
@@ -111,7 +158,12 @@ function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   return entry;
 }
 
-async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
+// 按指定服务器拉取 craft agent 可用模型（列表本身，不保证该服务器后端可跑全部模型）
+async function fetchCraftModels(
+  accessToken: string,
+  serverUrl: string,
+  domain: string,
+): Promise<RemoteModel[]> {
   const headers: Record<string, string> = {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
@@ -123,11 +175,11 @@ async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
     "X-IDE-Version": CONFIG.ideVersion,
     "X-Product-Version": CONFIG.appVersion,
     "X-Env-ID": CONFIG.envId,
-    "X-Domain": resolvedDomain,
+    "X-Domain": domain,
     "X-Product": CONFIG.product,
     "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
   };
-  const resp = await fetch(`${resolvedServerUrl}/v3/config`, { headers });
+  const resp = await fetch(`${serverUrl}/v3/config`, { headers });
   if (!resp.ok) return [];
   const body = (await resp.json()) as RemoteConfigResponse;
   if (body.code !== 0 || !body.data) return [];
@@ -135,8 +187,33 @@ async function fetchRemoteModels(accessToken: string): Promise<RemoteModel[]> {
   const modelMap = new Map(allModels.map((m) => [m.id, m]));
   const craftAgent = (body.data.agents || []).find((a) => a.name === CONFIG.agentIntent);
   const craftIds = craftAgent?.models || [];
-  if (craftIds.length === 0) return [DEFAULT_MODEL];
   return craftIds.map((id) => modelMap.get(id)).filter((m): m is RemoteModel => !!m?.supportsToolCall);
+}
+
+async function fetchRemoteModels(
+  accessToken: string,
+  supplement: RemoteModel[],
+): Promise<RemoteModel[]> {
+  const primary = await fetchCraftModels(accessToken, resolvedServerUrl, resolvedDomain);
+  if (primary.length === 0) return [DEFAULT_MODEL];
+  let result = primary;
+  // 国际端点列表里含 gpt-5.6/gemini 等国内端点 craft 列表未暴露的模型；
+  // 这些模型在国内端点后端同样可用（已实测），故合并补充。若主端点已是国际版则无需合并。
+  if (!resolvedServerUrl.includes("codebuddy.ai")) {
+    const intl = await fetchCraftModels(
+      accessToken,
+      "https://www.codebuddy.ai",
+      "www.codebuddy.ai",
+    );
+    const merged = new Map([...intl, ...primary].map((m) => [m.id, m]));
+    result = [...merged.values()];
+  }
+  // 补充 /v3/config 未暴露、但后端实测可用的模型（默认 claude 清单或用户 extraModels 配置）
+  const seen = new Set(result.map((m) => m.id));
+  for (const m of supplement) {
+    if (!seen.has(m.id)) result.push(m);
+  }
+  return result;
 }
 
 function generateUuid(): string {
@@ -381,7 +458,11 @@ function coalesceStream(response: Response): Response {
   return new Response(stream, { status: response.status, headers });
 }
 
-export const CodeBuddyAuthPlugin: Plugin = async (input) => {
+export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
+  const settings = (options ?? {}) as PluginSettings;
+  const supplement = Array.isArray(settings.extraModels)
+    ? settingsToRemoteModels(settings.extraModels)
+    : EXTRA_MODELS;
   return {
     async config(config) {
       if (!config.provider) config.provider = {};
@@ -406,9 +487,9 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
         try {
           const u = new URL(configuredBase);
           resolvedServerUrl = `${u.protocol}//${u.host}`;
-          if (resolvedServerUrl.includes("codebuddy.ai")) {
-            resolvedDomain = "www.codebuddy.ai";
-          }
+          resolvedDomain = resolvedServerUrl.includes("codebuddy.ai")
+            ? "www.codebuddy.ai"
+            : "www.codebuddy.cn";
         } catch {}
       }
       if (!provider.models) {
@@ -424,7 +505,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input) => {
         const all = JSON.parse(raw) as Record<string, { type: string; access?: string }>;
         const auth = all[PROVIDER_ID];
         if (auth?.type === "oauth" && auth.access) {
-          const work = fetchRemoteModels(auth.access);
+          const work = fetchRemoteModels(auth.access, supplement);
           discovered = await Promise.race([
             work,
             new Promise<RemoteModel[]>((resolve) =>
