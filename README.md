@@ -234,6 +234,7 @@ OpenCode CLI
   │              fetch 拦截所有 /chat/completions 请求
   └─ 对话流程 → 拦截请求
                 附加认证 headers（Authorization, B3 追踪, X-Model-ID 等）
+                同一会话内复用同一 X-Conversation-ID（让网关前缀缓存命中）
                 转发到 CodeBuddy /v2/chat/completions
                 直接透传 OpenAI 兼容 SSE 响应
 ```
@@ -243,6 +244,10 @@ OpenCode CLI
 - **无需 SSE 转换** — API 已直接返回标准 OpenAI 格式
 
 ## 与上游差异
+
+以下两项为本分支相对 [`kuops/opencode-codebuddy-auth`](https://github.com/kuops/opencode-codebuddy-auth) 的修复：
+
+### 1. 推理流逐词碎片化修复
 
 CodeBuddy 后端在 **每一帧** SSE 中都下发 `tool_calls: []`（空数组，非 null）。而
 `@ai-sdk/openai-compatible` 的解析器对任何非 null 的 `tool_calls` 都会触发一次
@@ -261,6 +266,22 @@ npm i -D opencode-codebuddy-auth-fixed
 > 该问题的根因在 CodeBuddy 后端（不应在无工具调用的流里下发空数组），同时
 > 也在 `@ai-sdk/openai-compatible` 解析器（对空数组的 `!= null` 判断过于宽松）。
 > 若上游修复任意一端，此改写逻辑自然退化为无害透传。
+
+### 2. 会话级 conversation id 复用（修复缓存读取恒为 0）
+
+CodeBuddy 网关的前缀缓存按 `X-Conversation-ID` 维度生效：换一个新 conversation id
+就是新会话，prompt 前缀内容一模一样也不会命中；同一 conversation id 下重复/增长的
+前缀命中率 ~95%+（deepseek / claude / glm 实际会话统计 94%~98%，gpt-5.6 系同样
+命中——实测字节相同的第二次请求 9515/9518 token 全部命中，积分从 x2.39 降到 x0.2）。
+
+上游实现每次请求都重新生成 `X-Conversation-ID`，导致每个请求在网关眼里都是新会话，
+全部冷启动：缓存读取恒为 0、缓存写入每次都顶满整个 prompt，会话历史里 gpt-5.6 系
+500+ 条消息 0 命中。
+
+本分支新增 `chat.headers` hook：为每个 opencode session 分配一个稳定的 conversation id
+（进程内 FIFO 缓存，上限 128 个会话），由 auth loader 拦截层读取并写入请求头，同一会话
+内所有请求复用同一个 `X-Conversation-ID`。opencode 重启后会话映射重置，恢复会话的首个
+请求会冷启动一次，之后恢复命中。
 
 ## 开发
 

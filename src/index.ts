@@ -148,6 +148,27 @@ const DISCOVERY_TIMEOUT_MS = 5000;
 let resolvedServerUrl = CONFIG.serverUrl;
 let resolvedDomain = CONFIG.domain;
 
+// CodeBuddy 网关的前缀缓存按 X-Conversation-ID 维度生效（实测：换一个新 conversation id
+// 就是新会话，prompt 前缀内容一模一样也不会命中；同 conversation id 下重复/增长的前缀
+// 命中率 ~95%+）。真实 CodeBuddy IDE 一次对话保持同一 conversation id，而旧实现每次
+// 请求都重新生成，导致 gpt-5.6 等模型每个请求都冷启动（缓存读取恒为 0、写入顶满）。
+// 这里为每个 opencode session 分配并复用同一个 conversation id（进程内缓存，FIFO 上限），
+// 使同一会话的后续请求能命中网关前缀缓存。
+const MAX_TRACKED_SESSIONS = 128;
+const sessionConversationIds = new Map<string, string>();
+
+function conversationIdForSession(sessionID: string): string {
+  const existing = sessionConversationIds.get(sessionID);
+  if (existing) return existing;
+  if (sessionConversationIds.size >= MAX_TRACKED_SESSIONS) {
+    const oldest = sessionConversationIds.keys().next().value;
+    if (oldest !== undefined) sessionConversationIds.delete(oldest);
+  }
+  const id = generateTraceId();
+  sessionConversationIds.set(sessionID, id);
+  return id;
+}
+
 function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
   const entry: Record<string, unknown> = { name: m.name };
   if (m.maxInputTokens || m.maxOutputTokens) {
@@ -273,14 +294,31 @@ function generateTraceId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function getHeader(init: RequestInit | undefined, name: string): string | undefined {
+  const headers = init?.headers;
+  if (!headers) return undefined;
+  const lower = name.toLowerCase();
+  if (headers instanceof Headers) return headers.get(name) ?? undefined;
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      if (key.toLowerCase() === lower) return value;
+    }
+    return undefined;
+  }
+  const record = headers as Record<string, string>;
+  return record[record[name] !== undefined ? name : lower];
+}
+
 function buildAuthHeaders(
   accessToken: string,
   modelId?: string,
+  conversationIdOverride?: string,
 ): Record<string, string> {
   const tenantId = resolveTenantId(accessToken);
   const enterpriseId = resolveEnterpriseId(accessToken);
   const userId = resolveUserId(accessToken);
-  const conversationId = generateTraceId();
+  // 同一会话内复用 chat.headers 注入的会话级 conversation id，否则每次请求新建
+  const conversationId = conversationIdOverride ?? generateTraceId();
   const messageId = generateTraceId();
   const traceId = generateTraceId();
   const spanId = generateTraceId().slice(0, 16);
@@ -580,12 +618,16 @@ export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
               requestBody.response_format = openaiRequest.response_format;
             }
 
+            // chat.headers hook 为本次请求注入了会话级 conversation id（session → id 映射），
+            // 拦截层从这里取回复用；取不到时退回每次请求随机生成（旧行为）。
+            const conversationId = getHeader(init, "x-conversation-id");
+
             const doRequest = async (token: string) => {
               return fetch(
                 `${resolvedServerUrl}${CONFIG.chatCompletionsPath}`,
                 {
                   method: "POST",
-                  headers: buildAuthHeaders(token, resolvedModel),
+                  headers: buildAuthHeaders(token, resolvedModel, conversationId),
                   body: JSON.stringify(requestBody),
                 },
               );
@@ -666,6 +708,12 @@ export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
     async "chat.params"(input, output) {
       if (input.model.providerID !== PROVIDER_ID) return;
       output.options.baseURL = resolvedServerUrl;
+    },
+    // 让 CodeBuddy 网关的前缀缓存能跨请求命中：同一 opencode session 复用同一
+    // X-Conversation-ID（由 auth loader 的拦截层读取后注入请求头）。
+    async "chat.headers"(input, output) {
+      if (input.model.providerID !== PROVIDER_ID) return;
+      output.headers["X-Conversation-ID"] = conversationIdForSession(input.sessionID);
     },
   } satisfies Hooks;
 };
