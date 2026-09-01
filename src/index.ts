@@ -157,6 +157,44 @@ let resolvedDomain = CONFIG.domain;
 const MAX_TRACKED_SESSIONS = 128;
 const sessionConversationIds = new Map<string, string>();
 
+// 会话级 conversation id 映射持久化：opencode 重启后插件进程内存清空，若不持久化，
+// 恢复会话的首个请求会拿到新的 conversation id（网关视角=新会话）→ 全量冷启动。
+// 持久化到 auth.json 同目录即可跨重启复用。
+function sessionStorePath(): string {
+  // 测试/自定义场景可用环境变量覆盖存储路径
+  if (process.env.CODEBUDDY_SESSION_STORE) return process.env.CODEBUDDY_SESSION_STORE;
+  return path.join(os.homedir(), ".local", "share", "opencode", "codebuddy-session-convids.json");
+}
+
+function loadSessionConvIds(): void {
+  try {
+    const raw = fs.readFileSync(sessionStorePath(), "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    let count = 0;
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === "string" && v && count < MAX_TRACKED_SESSIONS) {
+        sessionConversationIds.set(k, v);
+        count++;
+      }
+    }
+  } catch {
+    // 文件不存在或损坏：忽略，从空映射开始
+  }
+}
+
+function persistSessionConvIds(): void {
+  try {
+    const dir = path.dirname(sessionStorePath());
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${sessionStorePath()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(sessionConversationIds)));
+    fs.renameSync(tmp, sessionStorePath());
+  } catch {
+    // 持久化失败不影响缓存功能，忽略
+  }
+}
+
 function conversationIdForSession(sessionID: string): string {
   const existing = sessionConversationIds.get(sessionID);
   if (existing) return existing;
@@ -166,6 +204,7 @@ function conversationIdForSession(sessionID: string): string {
   }
   const id = generateTraceId();
   sessionConversationIds.set(sessionID, id);
+  persistSessionConvIds();
   return id;
 }
 
@@ -501,6 +540,8 @@ export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
   const supplement = Array.isArray(settings.extraModels)
     ? settingsToRemoteModels(settings.extraModels)
     : EXTRA_MODELS;
+  // 启动时加载持久化的会话→conversation id 映射（跨 opencode 重启复用，避免恢复会话冷启动）
+  loadSessionConvIds();
   return {
     async config(config) {
       if (!config.provider) config.provider = {};

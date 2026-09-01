@@ -280,8 +280,18 @@ CodeBuddy 网关的前缀缓存按 `X-Conversation-ID` 维度生效：换一个�
 
 本分支新增 `chat.headers` hook：为每个 opencode session 分配一个稳定的 conversation id
 （进程内 FIFO 缓存，上限 128 个会话），由 auth loader 拦截层读取并写入请求头，同一会话
-内所有请求复用同一个 `X-Conversation-ID`。opencode 重启后会话映射重置，恢复会话的首个
-请求会冷启动一次，之后恢复命中。
+内所有请求复用同一个 `X-Conversation-ID`。
+
+#### 持久化（v1.0.6+）
+
+conversation id 映射持久化到 `~/.local/share/opencode/codebuddy-session-convids.json`
+（与 auth.json 同目录）：opencode 重启后插件进程内存清空，若不做持久化，恢复会话的
+首个请求会拿到新的 conversation id（网关视角=新会话）→ 全量冷启动一次。持久化后
+跨重启也能复用同一个 id，恢复会话首个请求直接命中。
+
+> 注：缓存命中还要求请求前缀字节稳定。若会话历史被就地改写（如上下文管理把旧输出
+> 替换成占位符、重编号标记、往首部消息注入动态状态），改写点之后的前缀每次请求都会
+> 失配，缓存读取会锁在稳定前缀长度上。这是内容层面的限制，插件无法逾越。
 
 ## 开发
 

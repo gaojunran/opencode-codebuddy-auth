@@ -1,6 +1,6 @@
 {
   "name": "opencode-codebuddy-auth-fixed",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "OpenCode plugin for CodeBuddy (IOA) authentication, with reasoning coalescing fix",
   "repository": {
     "type": "git",
