@@ -127,6 +127,11 @@ interface PluginSettings {
     tool_call?: boolean;
     attachment?: boolean;
   }>;
+  /**
+   * 是否自动为推理模型注入 effort variants（TUI 里 ctrl+t 切换档次）。
+   * 默认 true；不需要时可设 false 整体关闭。
+   */
+  effortVariants?: boolean;
 }
 
 function settingsToRemoteModels(list: PluginSettings["extraModels"]): RemoteModel[] {
@@ -208,13 +213,48 @@ function conversationIdForSession(sessionID: string): string {
   return id;
 }
 
-function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
+// effort 档位阶梯：默认给全 low/medium/high/max 四档，由用户在 TUI 里自行决定。
+// 网关对单个模型有各自的合法档位（/v3/config 下发），发不支持的档位会 400——
+// 这里不做收敛，400 由用户自行承担/选择其他档位。
+const DEFAULT_EFFORT_LADDER = ["low", "medium", "high", "max"];
+const DEEPSEEK_ID_RE = /deepseek/i;
+// 网关统一 OpenAI 风格 reasoning_effort 的模型族（claude/gpt-5.6/glm/hy/kimi/minimax/qwen/gemini 均有实测）
+const REASONING_FAMILY_RE =
+  /(gpt[-. \d]*5[.\d]*|claude|gemini|glm[-. \d]*|hy[-_ ]?\d+|kimi|minimax|qwen)/i;
+
+/**
+ * 为模型生成 effort variants（opencode 模型配置的 variants 条目，扁平字段写入请求体）。
+ * auto / 非推理模型返回 undefined（不注入）。
+ */
+function effortVariantsForModel(m: RemoteModel): Record<string, unknown> | undefined {
+  const id = m.id?.toLowerCase() ?? "";
+  if (!id || id === "auto") return undefined;
+  const isDeepseek = DEEPSEEK_ID_RE.test(id);
+  if (!isDeepseek && m.supportsReasoning !== true && !REASONING_FAMILY_RE.test(id)) {
+    return undefined;
+  }
+
+  const variants: Record<string, unknown> = {};
+  for (const e of DEFAULT_EFFORT_LADDER) {
+    const body: Record<string, unknown> = { reasoning_effort: e };
+    // 官方 CodeBuddy 客户端对 deepseek 系思考链的标准形状：thinking enabled + effort（缺 effort 默认不思考）
+    if (isDeepseek) body.thinking = { type: "enabled" };
+    variants[e] = body;
+  }
+  return variants;
+}
+
+function remoteModelToConfig(m: RemoteModel, settings: PluginSettings): Record<string, unknown> {
   const entry: Record<string, unknown> = { name: m.name };
   if (m.maxInputTokens || m.maxOutputTokens) {
     entry.limit = { context: m.maxInputTokens ?? 0, output: m.maxOutputTokens ?? 0 };
   }
   if (m.supportsToolCall) entry.tool_call = true;
   if (m.supportsImages) entry.attachment = true;
+  if (settings.effortVariants !== false) {
+    const variants = effortVariantsForModel(m);
+    if (variants) entry.variants = variants;
+  }
   return entry;
 }
 
@@ -602,7 +642,7 @@ export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
 
       for (const m of discovered) {
         if (models[m.id]) continue;
-        models[m.id] = remoteModelToConfig(m);
+        models[m.id] = remoteModelToConfig(m, settings);
       }
     },
     auth: {
