@@ -15,6 +15,9 @@ npm install && npm run build   # tsc 编译到 dist/
 ## 架构要点
 
 - `src/index.ts` 是唯一源文件，导出 `CodeBuddyAuthPlugin`（Plugin 类型）和 default export
+- default export 同时携带 `setup`（opencode v2）与 `server`（v1.18.29+）双入口；v2 API（@opencode/plugin）仅在 setup 内动态 import——v1 运行时无该包，顶层静态引用会让 v1 加载失败
+- v2 机制对应：config hook → `provider.transform(editor.add)`；auth.loader 自定义 fetch → `session.hook("http.request"/"http.response"/"retry")`；auth.methods → `integration.transform(editor.method.update)`
+- 根目录 `index.ts` 是本地路径加载入口（opencode v2 的 plugins 目录条目解析根 index.ts 直跑 TS）；npm 包消费走 package.json exports → dist/
 - 运行时作为 OpenCode 插件加载，通过自定义 `fetch` 拦截 `/chat/completions` 请求并注入 CodeBuddy 认证 headers
 - `@opencode-ai/plugin` 是 peer dependency，仅开发时安装
 
@@ -41,4 +44,6 @@ npm install && npm run build   # tsc 编译到 dist/
 - 模型发现：主端点 craft 列表；主端点为国内时额外合并国际端点 craft 列表（去重，主端点优先）
 - 国际版模型（GPT-5.6/Gemini 等）在国内端点后端可直接调用（已实测），因此无需国际登录
 - 模型列表通过 `GET /v3/config` 获取（需 access token），可能随时变化
-- Token 存储路径：`~/.local/share/opencode/auth.json`，config hook 直接读取该文件获取 token
+- Token 存储路径：`~/.local/share/opencode/auth.json`（插件唯一事实源：登录/刷新均写回此文件）
+- v2 的 connection 存储在 `opencode.db` 的 `credential` 表（`cred_*` 行）；曾因读 connection 写 auth.json 不一致导致 resolve 命中已吊销旧 token（HTTP 401）
+- 刷新端点 `/v2/plugin/auth/token/refresh` 只认 `X-Refresh-Token` 头（Authorization/body 均报 10001:refreshToken is empty）

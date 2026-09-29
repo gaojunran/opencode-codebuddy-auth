@@ -1,8 +1,13 @@
 import type {
   Hooks,
   PluginInput,
-  Plugin,
+  Plugin as PluginV1,
 } from "@opencode-ai/plugin";
+// v2 类型仅用于编译期检查；运行时值在 setup 内动态 import——
+// v1 运行时不存在 @opencode/plugin，顶层静态 import 会让 v1 加载整个包失败。
+// 注意：主入口的 Plugin 是命名空间（含 define 函数），不能直接当类型用；
+// Context 接口从子路径 promise/plugin 导入。
+import type { Context as V2Context } from "@opencode/plugin/promise/plugin";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -516,8 +521,11 @@ async function refreshAccessToken(
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
-          Authorization: `Bearer ${refreshToken}`,
+          // 实测（2026-09）：网关只从 X-Refresh-Token 头读取 refresh token。
+          // 放 Authorization: Bearer 或 body 字段都会得到 10001:refreshToken is empty。
+          "X-Refresh-Token": refreshToken,
         },
+        body: JSON.stringify({ platform: CONFIG.platform }),
       },
     );
     if (!response.ok) return null;
@@ -575,7 +583,7 @@ function coalesceStream(response: Response): Response {
   return new Response(stream, { status: response.status, headers });
 }
 
-export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
+export const CodeBuddyAuthPlugin: PluginV1 = async (input, options) => {
   const settings = (options ?? {}) as PluginSettings;
   const supplement = Array.isArray(settings.extraModels)
     ? settingsToRemoteModels(settings.extraModels)
@@ -799,7 +807,346 @@ export const CodeBuddyAuthPlugin: Plugin = async (input, options) => {
   } satisfies Hooks;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenCode v2 入口
+//
+// 同一包双版本兼容：default export 同时携带 setup（v2 读取）与 server（v1.18.29+
+// 读取）。v2 的 API（Plugin/Provider/Model/Credential/Integration 命名空间）全部在
+// setup 内动态 import —— v1 运行时没有 @opencode/plugin 包，顶层静态引用会直接
+// 导致 v1 加载失败。
+//
+// v1 → v2 机制对应：
+//   config hook 注入 provider+models  →  ctx.provider.transform(editor.add(...))
+//   auth.loader 自定义 fetch          →  ctx.session.hook("http.request"/"http.response"/"retry")
+//   auth.methods（OAuth 登录）         →  ctx.integration.transform(editor.method.update(...))
+//   chat.headers（X-Conversation-ID） →  http.request 拦截层内直接注入
+//   reasoning_effort variants          →  Model.Info.variants（{ id, headers, body }）
+// ─────────────────────────────────────────────────────────────────────────────
+
+type V2Registration = { dispose: () => Promise<void> | void };
+
+interface CodeBuddyCredential {
+  access: string;
+  refresh?: string;
+}
+
+// 会话内凭证缓存：401 刷新后立即生效，避免每次请求都读文件/走 RPC
+let credentialCache: CodeBuddyCredential | null = null;
+
+function authFilePath(): string {
+  return path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+}
+
+function readAuthFileCredential(): CodeBuddyCredential | null {
+  try {
+    const raw = fs.readFileSync(authFilePath(), "utf8");
+    const all = JSON.parse(raw) as Record<
+      string,
+      { type?: string; access?: string; refresh?: string } | undefined
+    >;
+    const entry = all[PROVIDER_ID];
+    if (entry?.type === "oauth" && entry.access) {
+      return { access: entry.access, refresh: entry.refresh || undefined };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// 与 v1 的 input.client.auth.set 等价：直接更新 auth.json 的 codebuddy 条目（原子写）
+function writeAuthFileCredential(cred: CodeBuddyCredential, expires: number): void {
+  try {
+    const file = authFilePath();
+    let all: Record<string, unknown> = {};
+    try {
+      all = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    } catch {
+      // 文件不存在或损坏：从仅含本条目的新文件开始
+    }
+    all[PROVIDER_ID] = {
+      type: "oauth",
+      access: cred.access,
+      refresh: cred.refresh || "",
+      expires,
+    };
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(all, undefined, 2));
+    fs.renameSync(tmp, file);
+  } catch {
+    // 写回失败不影响本次请求（内存缓存已更新）
+  }
+}
+
+// 凭证解析顺序：内存缓存 → auth.json（插件唯一事实源：登录/刷新写回均落此文件）→ v2 connection 存储（兜底）。
+// 历史教训（2026-09）：曾优先读 connection 存储（opencode.db credential 表），而登录/刷新只写 auth.json，
+// 两处分叉后 resolve 一直命中已吊销的旧 token 对（HTTP 401）。统一以 auth.json 为准后不再分叉。
+async function resolveCredential(ctx: V2Context): Promise<CodeBuddyCredential | null> {
+  if (credentialCache?.access) return credentialCache;
+  const fromFile = readAuthFileCredential();
+  if (fromFile) return fromFile;
+  try {
+    const connection = await ctx.integration.connection.active(PROVIDER_ID);
+    if (connection) {
+      const value = (await ctx.integration.connection.resolve(connection)) as
+        | { type?: string; access?: string; refresh?: string }
+        | undefined;
+      if (value?.type === "oauth" && value.access) {
+        return { access: value.access, refresh: value.refresh || undefined };
+      }
+    }
+  } catch {
+    // connection 存储不可用时保持无凭证状态
+  }
+  return null;
+}
+
+// v1 的 variants 形状是 { effort: body }；v2 的 Model.Info.variants 是 { id, headers, body } 数组
+function toV2Variants(
+  m: RemoteModel,
+  settings: PluginSettings,
+): Array<{ id: string; headers: Record<string, string>; body: Record<string, unknown> }> | undefined {
+  if (settings.effortVariants === false) return undefined;
+  const variants = effortVariantsForModel(m);
+  if (!variants) return undefined;
+  return Object.entries(variants).map(([id, body]) => ({
+    id,
+    headers: {},
+    body: body as Record<string, unknown>,
+  }));
+}
+
+async function setupV2(ctx: V2Context): Promise<(() => Promise<void>) | void> {
+  const v2 = await import("@opencode/plugin");
+
+  const settings = (ctx.options ?? {}) as PluginSettings & { serverUrl?: string };
+  const supplement = Array.isArray(settings.extraModels)
+    ? settingsToRemoteModels(settings.extraModels)
+    : EXTRA_MODELS;
+  if (typeof settings.serverUrl === "string" && settings.serverUrl) {
+    try {
+      const u = new URL(settings.serverUrl);
+      resolvedServerUrl = `${u.protocol}//${u.host}`;
+      resolvedDomain = resolvedServerUrl.includes("codebuddy.ai")
+        ? "www.codebuddy.ai"
+        : "www.codebuddy.cn";
+    } catch {
+      // 非法 URL：忽略，保持默认端点
+    }
+  }
+  loadSessionConvIds();
+
+  // 1) 注册 integration 与 IOA OAuth 登录方法（v2 的 `opencode auth login` 走这里）
+  await ctx.integration.transform((editor) => {
+    editor.update(PROVIDER_ID, (integration) => {
+      integration.name = "CodeBuddy";
+    });
+    const methodID = v2.Integration.MethodID.make("ioa");
+    editor.method.update({
+      integrationID: PROVIDER_ID,
+      method: { id: methodID, type: "oauth", label: "IOA 登录 (浏览器)" },
+      authorize: async () => {
+        const authState = await requestAuthState();
+        const expiresAt = Date.now() + 10 * 60 * 1000;
+        return {
+          mode: "auto" as const,
+          url: authState.url,
+          instructions: "请在浏览器中完成 IOA 登录",
+          expiresAt,
+          callback: (async () => {
+            const tokenData = await pollForToken(authState.state, expiresAt);
+            if (!tokenData) throw new Error("IOA 登录超时或未完成，请重试");
+            const expires = tokenData.expiresIn
+              ? Date.now() + tokenData.expiresIn * 1000
+              : Date.now() + 24 * 60 * 60 * 1000;
+            const next = {
+              type: "oauth" as const,
+              methodID,
+              access: tokenData.accessToken,
+              refresh: tokenData.refreshToken || "",
+              expires,
+            };
+            // 同步写回 auth.json（与 refresh 路径一致），避免 connection 存储与文件分叉
+            credentialCache = { access: next.access, refresh: next.refresh };
+            writeAuthFileCredential({ access: next.access, refresh: next.refresh }, expires);
+            return next;
+          })(),
+        };
+      },
+      refresh: async (credential) => {
+        const current = credential.refresh ? String(credential.refresh) : "";
+        if (!current) throw new Error("缺少 refresh token，请重新登录");
+        const refreshed = await refreshAccessToken(current);
+        if (!refreshed?.accessToken) throw new Error("CodeBuddy token 刷新失败，请重新登录");
+        const next = {
+          ...credential,
+          access: refreshed.accessToken,
+          refresh: refreshed.refreshToken || current,
+          expires: refreshed.expiresIn
+            ? Date.now() + refreshed.expiresIn * 1000
+            : Date.now() + 24 * 60 * 60 * 1000,
+        };
+        credentialCache = { access: next.access, refresh: String(next.refresh) };
+        writeAuthFileCredential({ access: next.access, refresh: String(next.refresh) }, Number(next.expires));
+        return next;
+      },
+    });
+  });
+
+  // 2) 注册 provider 与模型清单（v1 config hook 的对应物；启动时发现一次，失败用内置兜底）
+  let discovered: RemoteModel[] = [];
+  try {
+    const cred = await resolveCredential(ctx);
+    if (cred?.access) {
+      discovered = await Promise.race([
+        fetchRemoteModels(cred.access, supplement),
+        new Promise<RemoteModel[]>((resolve) =>
+          setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+        ),
+      ]);
+    }
+  } catch {
+    // 发现失败：使用兜底清单
+  }
+  if (discovered.length === 0) {
+    discovered = [DEFAULT_MODEL];
+  }
+
+  const providerID = v2.Provider.ID.make(PROVIDER_ID);
+  const models = discovered.map((m) => {
+    const base = v2.Model.Info.default(providerID, v2.Model.ID.make(m.id));
+    const variants = toV2Variants(m, settings);
+    return {
+      ...base,
+      name: m.name,
+      limit: {
+        ...base.limit,
+        ...(m.maxInputTokens || m.maxOutputTokens
+          ? { context: m.maxInputTokens ?? 0, output: m.maxOutputTokens ?? 0 }
+          : {}),
+      },
+      capabilities: {
+        ...base.capabilities,
+        ...(m.supportsToolCall !== undefined ? { tools: !!m.supportsToolCall } : {}),
+      },
+      ...(variants
+        ? { variants: variants.map((v) => ({ ...v, id: v2.Model.VariantID.make(v.id) })) }
+        : {}),
+    };
+  });
+
+  await ctx.provider.transform((editor) => {
+    editor.add({
+      info: {
+        ...v2.Provider.Info.empty(providerID),
+        name: "CodeBuddy",
+        activation: "enabled",
+        // SDK 只负责把请求发到 baseURL；真实认证头与模型解析由下方 http.request 拦截层注入
+        package: "@opencode/ai/providers/openai-compatible",
+        settings: {
+          baseURL: `${resolvedServerUrl}/v2`,
+          apiKey: "cli-proxy",
+        },
+        integrationID: v2.Integration.ID.make(PROVIDER_ID),
+      },
+      models,
+    });
+  });
+
+  // 3) 请求拦截层：完整 CodeBuddy 头 + 模型解析 + 会话级 X-Conversation-ID 复用
+  const registrations: V2Registration[] = [];
+
+  registrations.push(
+    await ctx.session.hook(
+      "http.request",
+      async (event) => {
+        const url = new URL(event.request.url);
+        if (!url.pathname.endsWith("/chat/completions")) return;
+
+        const cred = await resolveCredential(ctx);
+        if (!cred?.access) {
+          throw new Error("缺少 CodeBuddy access token，请运行 opencode auth login 重新登录");
+        }
+
+        // body 是一次性流：clone 后读取，再整体替换 request
+        const openaiRequest = (await event.request.clone().json()) as OpenAIRequest;
+        const resolvedModel = resolveModel(openaiRequest.model);
+        if (!resolvedModel) {
+          throw new Error("未设置模型，请设置 CODEBUDDY_DEFAULT_MODEL 或在 OpenCode 选择模型");
+        }
+        const requestBody: OpenAIRequest = {
+          ...openaiRequest,
+          model: resolvedModel,
+          stream: openaiRequest.stream ?? true,
+        };
+        if (openaiRequest.response_format) {
+          requestBody.response_format = openaiRequest.response_format;
+        }
+
+        const conversationId = conversationIdForSession(event.sessionID);
+        event.request = new Request(`${resolvedServerUrl}${CONFIG.chatCompletionsPath}`, {
+          method: "POST",
+          headers: buildAuthHeaders(cred.access, resolvedModel, conversationId),
+          body: JSON.stringify(requestBody),
+        });
+      },
+      { providerID: PROVIDER_ID },
+    ),
+  );
+
+  // 4) 401/403：用 refresh token 换新 access token（写回 auth.json + 内存缓存）后立即重试
+  registrations.push(
+    await ctx.session.hook(
+      "retry",
+      async (event) => {
+        const status = (event.error as { status?: number }).status;
+        if ((status !== 401 && status !== 403) || event.attempt > 2) return;
+        const cred = await resolveCredential(ctx);
+        if (!cred?.refresh) return;
+        const refreshed = await refreshAccessToken(cred.refresh);
+        if (!refreshed?.accessToken) return;
+        const next = {
+          access: refreshed.accessToken,
+          refresh: refreshed.refreshToken || cred.refresh,
+          expires: refreshed.expiresIn
+            ? Date.now() + refreshed.expiresIn * 1000
+            : Date.now() + 24 * 60 * 60 * 1000,
+        };
+        credentialCache = { access: next.access, refresh: next.refresh };
+        writeAuthFileCredential(next, next.expires);
+        event.decision = { retry: true, delay: 0 };
+      },
+      { providerID: PROVIDER_ID },
+    ),
+  );
+
+  // 5) SSE 修复：CodeBuddy 每帧下发 tool_calls:[]（空数组非 null），openai-compatible
+  //    SDK 视其为 reasoning-end 导致逐词碎片化 thinking；归一为 null 让推理连续累积
+  registrations.push(
+    await ctx.session.hook(
+      "http.response",
+      (event) => {
+        const contentType = event.response.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) return;
+        event.response = coalesceStream(event.response);
+      },
+      { providerID: PROVIDER_ID },
+    ),
+  );
+
+  return async () => {
+    for (const registration of registrations) {
+      try {
+        await registration.dispose();
+      } catch {
+        // 卸载阶段忽略清理失败
+      }
+    }
+  };
+}
+
 export default {
   id: "codebuddy-auth",
+  setup: setupV2,
   server: CodeBuddyAuthPlugin,
 };

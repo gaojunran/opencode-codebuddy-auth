@@ -1,7 +1,7 @@
 {
   "name": "opencode-codebuddy-auth-fixed",
-  "version": "1.0.7",
-  "description": "OpenCode plugin for CodeBuddy (IOA) authentication, with reasoning coalescing fix",
+  "version": "2.0.0",
+  "description": "OpenCode plugin for CodeBuddy (IOA) authentication, with reasoning coalescing fix (v1 + v2 compatible)",
   "repository": {
     "type": "git",
     "url": "https://github.com/gaojunran/opencode-codebuddy-auth.git"
@@ -10,17 +10,20 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./server": "./dist/index.js"
+    ".": "./dist/index.js"
+  },
+  "engines": {
+    "opencode": ">=1.18.29"
   },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "tsc"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=0.1.0"
+  "dependencies": {
+    "@opencode/plugin": "^2.0.19"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
+    "@opencode-ai/plugin": "1.18.33",
     "@types/node": "^25.6.0",
     "typescript": "^5.8.0"
   },
